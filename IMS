@@ -1,0 +1,351 @@
+ FUNCTION_BLOCK IMS_Kol
+
+VAR
+(* Примеры программ мастера и сервера подключенных к сети через модуль NIM74х																									*)
+(* В состав системы входят: контроллер CPM701 и два модуля NIM74х																															*)
+(* На одном NIM74х функционирует мастер, на другом сервер 																																		*)
+(* Протокол обмена в примере: запрос мастера (один кадр) -> ответ сервера (один кадр) 																				*)
+(* Формат кадра запроса мастера: адрес сервера(byte)+код функции(byte)+длина данных запроса(word)+ данные запроса + crc(word) *)
+(* Формат кадра ответа сервера: адрес мастера(byte)+код результата(byte)+длина данных ответа(word)+ данные ответа + crc(word) *)
+(* Границы кадров на принимающей стороне определяются по превышению таймаута после приема последнего символа 									*)
+(* Адрес сервера от 0 до 127 (в примере 5) 																																										*)
+(* Адрес мастера всегда 128 																																																	*)
+(* Сервер отвечает только на адресованные ему запросы, описанного выше формата и при условии корректного crc в принятом кадре*)
+(* В примере определена единственная функция ping с кодом 11, выполняющая эхо-ответ данных запроса в кадре ответа мастеру 		*)
+(* Клиент с периодом 200 мс выполняет вызов функции ping 																																			*)
+
+
+(* Программа сервера *)
+
+	(* Функциональный блок NIM74х *)
+	hwNim74x : NIM741_DIRECT;
+	(* Текущее состояние сервера *)
+	serverState : SERVER_STATE;
+	(* Адрес нашего сервера *)
+	byServerAddr : BYTE := 5;
+	(* Время ожидания запроса *)
+	timeToWait : TIME := T#5000ms;
+	(* Таймаут межсимвольного интервала, для определение границы кадра *)
+	intervalTimeout : TIME := T#20ms;
+
+	(* Признак проведенной инициализации *)
+	fInitialized : BOOL := FALSE;
+	(* Массив под формирование запроса/ответа *)
+	abyBuffer : ARRAY [0..255] OF BYTE;
+	(* Код завершения операции *)
+	byExeptionCode : BYTE;
+	(* Код функции запроса *)
+	byFunctionCode : BYTE;
+	(* Длина данных *)
+	wDataLen : WORD;
+	(* Оffset *)
+	wOffset : WORD;
+
+	(* Контрольная сумма *)
+	wCrc16 : WORD;
+
+	(* Счетчик транзакций *)
+	transactionCount : DWORD;
+	(* Счетчик транзакций завершенных исключением *)
+	transactionErrorCount : DWORD;
+
+(* Коля переменные *)
+	IMSData : ARRAY [1..8] OF BYTE;
+	IMSDataOUT : ARRAY [1..8] OF BYTE;
+	ReserveData : ARRAY [1..8] OF BYTE;
+	i : BYTE;
+	zad : WORD;
+  zad1 : REAL;
+
+	(* Задание от ИМС *)
+	currentTime : TIME;
+
+	startByte : BYTE := 16#AA;
+  secondByte : BYTE := 16#1F;
+  thirdByte : BYTE := 16#21;
+	lastByte: BYTE := 16#2F;
+	masterByte : BYTE := 16#12;  (*для первой линейки*) (* masterByte : BYTE := 16#13;для второй линейки*)
+	reserveLine : BYTE := 16#32; (*для первой линейки*) (* reserveLine : BYTE := 16#23;для второй линейки*)
+  silent  : BYTE;
+	sleep   : BOOL; (* команда "молчать" от соседней линейки *)
+	st_byte : BYTE;
+	ml_byte : BYTE;
+	angle   : BYTE;
+	angle1  : WORD;
+	crc1    : BYTE;
+	crcreserve : BYTE := 16#32;  (*для первой линейки*) (* crcreserve : BYTE := 16#23;для второй линейки*)
+END_VAR
+
+IF NOT gStartAll THEN
+	RETURN;
+END_IF
+
+IF fInitialized = FALSE OR hwNim74x.state = UART_UNCERTAIN THEN
+	(* инициализация сервера или сбой устройства NIM74x *)
+
+	(* ставим "нерабочее" состояние сервера *)
+	serverState := SERVER_IDLE;
+
+	(* выполняем необходимую инициализацию параметров сервера. В нашем случае - сброс счетчиков диагностики *)
+	IF fInitialized = FALSE THEN
+		transactionCount := 0;
+		transactionErrorCount := 0;
+
+		fInitialized := TRUE;
+	END_IF
+
+	(* инициализируем блок NIM74x *)
+	hwNim74x
+	(
+		command:= UART_CMD_INIT,
+		state=> ,
+		status=>
+	);
+
+	(* ждем готовности блока NIM74x *)
+	IF hwNim74x.state = UART_UNCERTAIN THEN
+		RETURN;
+	END_IF
+END_IF
+
+IF hwNim74x.state = UART_READY THEN
+	(* предыдущая операция (INIT, RECEIVE, TRANSMIT) завершена *)
+
+	byExeptionCode := 255; (* В нашем примере код 255 признак того, что отправлять ничего не нужно *)
+
+IF  serverState = SERVER_RECV_REQUEST THEN
+		(* сервер в состоянии ожидания приема запроса / завершена операция чтения - смотрим что принято *)
+		byExeptionCode := 0; (* В нашем примере код 0 признак отсутствия ошибок *)
+		crc1 := (abyBuffer[2] + abyBuffer[3] + abyBuffer[4] + abyBuffer[5]);
+		IF abyBuffer[0] <> startByte THEN
+			byExeptionCode := 255;
+			(*Zadanie_IMS :=0;*)
+			transactionErrorCount := transactionErrorCount +1;
+			ELSIF	abyBuffer[1] <> secondByte THEN
+				byExeptionCode := 255;
+				(*Zadanie_IMS :=0;*)
+				transactionErrorCount := transactionErrorCount +1;
+				ELSIF abyBuffer[2] <> thirdByte THEN
+					byExeptionCode := 255;
+					(*Zadanie_IMS :=0;*)
+					transactionErrorCount := transactionErrorCount +1;
+					ELSIF abyBuffer[7] <> lastByte THEN
+						byExeptionCode := 255;
+						(*Zadanie_IMS :=0;*)
+						transactionErrorCount := transactionErrorCount +1;
+						ELSIF abyBuffer[6] <> crc1 THEN
+							byExeptionCode := 255;
+							(*Zadanie_IMS :=0;*)
+							transactionErrorCount := transactionErrorCount +1;(* проблема с контрольной суммой, такая её реализация мешает получению
+																													данных от ИМС Олег*)
+		ELSE
+
+	(* ###########   В массив записываем то, что получили    ######################*)
+
+		FOR i := 1 TO 8 DO
+			IMSData[i] := abyBuffer[i-1];
+		END_FOR
+
+	(*	Проверяем отправителя: ИМС или другая линейка ПЛК СУРМ *)
+		IF IMSData[3] = 16#32 OR IMSData[3] = 16#23 THEN
+			ReserveData := IMSData;
+			sleep := TRUE;
+		ELSE
+			sleep := FALSE;
+		END_IF
+
+
+	(* ###############   Здесь делать разбор полученного пакета   ################ *)
+
+	IF NOT sleep THEN
+
+
+		zad := IMSData[5];
+			zad := SHL(zad,8);
+			zad := zad + IMSData[4];
+			IF zad >= 16#8000 THEN
+				Zadanie_IMS := 16#FFFF - zad(*zad - 16#FF00*);
+				Zadanie_IMS := -Zadanie_IMS - 1;
+					ELSE
+				Zadanie_IMS := zad;
+			END_IF
+
+
+
+END_IF
+
+
+
+	(* ################################################################  *)
+		byExeptionCode := 14;  	(* ######  Переходим к формированию задержки в 14 мс ###### *)
+		currentTime := TIME();
+
+
+	(* ################################################################  *)
+
+
+
+		IF byExeptionCode <> 255 THEN
+			(* признак того, что нужно отправлять данные *)
+			(* в нашем примере формат кадра сервера: адрес мастера(byte)+код результата(byte)+длина данных(word)+ данные + crc(word) *)
+			abyBuffer[0] := startByte; (* Байт начала пакета *)
+			abyBuffer[1] := secondByte;
+			abyBuffer[2] := masterByte;
+			IF CurrentAngle >= 1800 THEN
+				angle1 := (*INT_TO_WORD*)(REAL_TO_WORD(CurrentAngle - 1800));
+					IF angle1 <= 16#FF THEN
+						abyBuffer[3] := WORD_TO_BYTE(angle1);
+						abyBuffer[4]:= WORD_TO_BYTE(SHR(angle1, 8));
+					ELSE
+					 	abyBuffer[3] := WORD_TO_BYTE(angle1);
+						abyBuffer[4]:= 16#01;
+					END_IF
+			ELSE
+				angle1 := (*INT_TO_WORD*)(REAL_TO_WORD(1800 - CurrentAngle));
+					IF angle1 <= 16#FF THEN
+						angle1 := 16#FF - angle1;
+						angle := WORD_TO_BYTE(angle1);
+						abyBuffer[3] := angle;
+						abyBuffer[4]:= 16#FF;
+					ELSE
+						angle1 := ABS(16#FF - angle1);
+						angle := WORD_TO_BYTE(angle1);
+						abyBuffer[3] := angle;
+						abyBuffer[4] := 16#FE;
+					END_IF
+			END_IF
+(* Для резервной линейки - раскомментировать строку ниже *)
+   (* END_IF *)
+
+		(*	IF CurrentAngle < 1545 THEN
+				CurrentAngle := 1800 - CurrentAngle;
+				CurrentAngle := CurrentAngle * 0.1;
+				angle1 := (*INT_TO_WORD*)(REAL_TO_WORD(CurrentAngle));
+				angle1 := 16#FF - angle1;
+				angle := WORD_TO_BYTE(angle1);
+				abyBuffer[3] := angle;
+				abyBuffer[4]:= 16#FF;
+			END_IF
+*)
+	(*		IF CurrentAngle > 1800 THEN
+				abyBuffer[3] := abyBuffer[3]*(-1);
+				abyBuffer[4] := abyBuffer[4]*(-1);
+			END_IF *)  (*бред*)
+			(*abyBuffer[3] := 255;
+			abyBuffer[4] := 0;
+			abyBuffer[5] := 2#01000111;*)
+(***************************** сборка битов для 6го байта**********************)
+      IF HodLamp AND DistLamp AND NOT DistProst THEN (*следящий*)
+   			abyBuffer[5] := abyBuffer[5] OR 2#00000001;
+			ELSE
+				abyBuffer[5] := abyBuffer[5] AND 2#11111110;
+      END_IF
+
+			IF Mestn THEN
+				abyBuffer[5] := abyBuffer[5] AND 2#11111101;
+			END_IF
+
+			IF Dist THEN
+				abyBuffer[5] := abyBuffer[5] OR 2#00000010;
+			END_IF
+
+			IF NALamp THEN
+				abyBuffer[5] := abyBuffer[5] OR 2#00000100;
+			ELSE
+				abyBuffer[5] := abyBuffer[5] AND 2#11111011;
+			END_IF
+
+			IF DKPLLamp THEN
+				abyBuffer[5] := abyBuffer[5] OR 2#00010000;
+			ELSE
+				abyBuffer[5] := abyBuffer[5] AND 2#11101111;
+			END_IF
+
+			IF DKPRLamp THEN
+				abyBuffer[5] := abyBuffer[5] OR 2#00100000;
+			ELSE
+				abyBuffer[5] := abyBuffer[5] AND 2#11011111;
+			END_IF
+
+			abyBuffer[5] := abyBuffer[5] OR 2#01000000; (* Надо собрать этот сигнал по п.4 протокола *)
+
+(*****
+************************* сборка завершена************************)
+		(* Вариант 1 от Игоря подсчета CRC *)
+			(*abyBuffer[6]:= abyBuffer[2];
+			FOR i:=3 TO 6 DO
+				abyBuffer[6]:= abyBuffer[6]+abyBuffer[i];
+				IF abyBuffer[6]>255 THEN
+					abyBuffer[6]:=abyBuffer[6]-255;
+				END_IF
+			END_FOR *)
+			(* Вариант 2 от Коли подсчета CRC. Есть подозрение, что в протоколе опечатка и там сложение по модулю 2 *)
+			abyBuffer[6] := abyBuffer[2] XOR abyBuffer[3] XOR abyBuffer[4] XOR abyBuffer[5];
+	(* abyBuffer[6] := abyBuffer[2] + abyBuffer[3] + abyBuffer[4] + abyBuffer[5];       тест по месту *)
+			IMSDataOUT[7] := abyBuffer[6];
+			(* ##### *)
+			abyBuffer[7] := lastByte;
+			TransactionCount := TransactionCount + 1;
+
+  (* команда второй линейке "молчать" *)
+	(* сборка команды *)
+			silent := SHL(startByte,2);
+			silent := SHL(silent + secondByte, 2);
+			silent := SHL(silent + reserveLine,8);
+			silent := silent + crcreserve;
+
+
+(* ############## отправить линейке silent #################### *)
+
+			IF byExeptionCode <> 0 THEN
+				transactionErrorCount := transactionErrorCount + 1;
+			END_IF
+			wOffset := 7;
+			(* отправляем ответ *)
+			hwNim74x
+			(
+				command:= UART_CMD_TRANSMIT,
+				pDataToSend:= ADR(abyBuffer[0]),
+				sendDataSize:= (wOffset + 1), (* длина на 1 больше смещения *)
+				transmission_mode:= RTU_FRAME,
+				transmittedDataSize=> ,
+				state=> ,
+				status=>
+			);
+
+			(* переводим состояние сервера в состояние отправки ответа *)
+			serverState := SERVER_SEND_RESPONSE;
+		END_IF
+	END_IF
+
+	IF byExeptionCode = 255 THEN
+		(* или ничего не принято, или ответа не будет *)
+		(* или завершена отправка данных *)
+		(* в любом случае становимся на ожидание запроса *)
+		hwNim74x
+		(
+			command:= UART_CMD_RECEIVE,
+			pReceiveBuffer:= ADR(abyBuffer[0]),
+			receiveBufferSize:= SIZEOF(abyBuffer) ,
+			timeToWait:= timeToWait,
+			intervalTimeout:= intervalTimeout,
+			receivedDataSize=> ,
+			state=> ,
+			status=>
+		);
+
+		(* ставим состояние приема запроса *)
+		serverState := SERVER_RECV_REQUEST;
+	END_IF
+
+ELSIF (hwNim74x.state = UART_RECEIVING) OR (hwNim74x.state = UART_TRANSMITTING) THEN
+	(* продолжаем выполнение операции *)
+	hwNim74x
+	(
+		command:= UART_CMD_IDLE,
+		receivedDataSize=> ,
+		sendDataSize=> ,
+		state=> ,
+		status=>
+	);
+END_IF
