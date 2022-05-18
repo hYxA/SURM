@@ -1,0 +1,57 @@
+FUNCTION InitMbServer : INT
+VAR_INPUT
+	eventType : DWORD;
+END_VAR
+
+VAR
+(*
+	(* Параметры обмена COM101-115200-8-N-1 и адрес узла 5 *)
+	mbNodeSettings : F_MODBUS_SERVER_SETTINGS :=
+		(Port:=101, BaudRate:=115200, StopBits:=1, Parity:=0, ByteSize:=8, NodeAddress:=5);
+
+	(* Дескриптор принимаемых данных *)
+	inputsDesc : F_VAR_DESCRIPTOR;
+
+	(* Дескриптор передаваемых данных *)
+	outputsDesc : F_VAR_DESCRIPTOR;
+
+	(* Дескриптор диагностики *)
+	diagnosticsDesc : F_VAR_DESCRIPTOR;
+*)
+END_VAR
+
+
+IF eventType = F_EVENT_ON_INIT THEN
+;
+	(* Инициализация диагностики *)
+(*
+	(* Индекс POU PLC_PRG области передаваемых данных *)
+	outputsDesc.PouIndex := INDEXOF(MbServerTask);
+	(* Адрес области передаваемых давнных *)
+	outputsDesc.Address := ADR(MbServerTask.MbSrvOutput);
+	(* Размер области передаваемых давнных *)
+	outputsDesc.Size := SIZEOF(MbServerTask.MbSrvOutput);
+
+	(* Индекс POU PLC_PRG области принимаемых данных *)
+	inputsDesc.PouIndex := INDEXOF(MbServerTask);
+	(* Адрес области передаваемых давнных *)
+	inputsDesc.Address := ADR(MbServerTask.MbSrvInput);
+	(* Размер области передаваемых давнных *)
+	inputsDesc.Size := SIZEOF(MbServerTask.MbSrvInput);
+
+	(* Индекс POU PLC_PRG области диагностики *)
+	diagnosticsDesc.PouIndex := INDEXOF(MbServerTask);
+	(* Адрес области диагностики *)
+	diagnosticsDesc.Address := ADR(MbServerTask.MbSrvDiags);
+	(* Размер области диагностики *)
+	diagnosticsDesc.Size := SIZEOF(MbServerTask.MbSrvDiags);
+
+	(* Инициализация сервера *)
+	MbServerInitResult := FwModbusServerInit( ADR(mbNodeSettings),
+																						ADR(inputsDesc),
+																						ADR(outputsDesc),
+																						ADR(diagnosticsDesc));
+
+	InitMbServer := MbServerInitResult;
+*)
+END_IF
