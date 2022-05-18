@@ -1,0 +1,277 @@
+PROGRAM MAIN_PRG
+VAR
+	CLIENT_FOR_ACPVT : CLIENT_FOR_ACPVT;
+	temp1: REAL;
+END_VAR
+(* Ïåðåìåííûå ðåæèìà ÒÅÑÒ *)
+VAR
+	leftTON : TON;      (* декремент счетчика задания по времени t *)
+	rightTON: TON;      (* инкремент счетчика задания по времени t *)
+	startTON: TON;			(* задержка отработки после отпускания кнопок *)
+	ustCTUD : CTUD;     (* счетчик для накопления *)
+	BL:BLINK;						(* генератор импульсов для доводки *)
+	ustload : BOOL;     (* сброс счетчика в ноль *)
+	t       : TIME:= T#500ms;
+	zero    : INT := 180;
+	lim     : INT:=35;
+	Lcount  : BOOL;         (* управление счетчиком от кнопки ЛЕВО  *)
+	Rcount  : BOOL;         (* управление счетчиком от кнопки ПРАВО *)
+	startust: BOOL;
+	OldLBut : BOOL:=FALSE;  (* состояние кнопки в конце цикла    *)
+	OldRBut : BOOL:=FALSE;  (* состояние кнопки в конце цикла    *)
+	FlagBut : BOOL:=FALSE;  (* флаг нажатия любой стрелки        *)
+	FlagTest: BOOL:=FALSE;  (* флаг начала работы в режиме ТЕСТ  *)
+	FlagStart:BOOL:=FALSE;  (* флаг начала отработки задания    *)
+
+  errorCount : INT := 0   (* счетчик ошибок по периферии *)
+
+	error_flag:BOOL;				(* флаг наличия ошибок *)
+	LeftOutTime: BOOL;
+	RightOutTime: BOOL;
+	RightTimerVALVE: TP;
+	LeftTimerVALVE: TP;
+	REG:REG1;
+(**********************************************************************************)
+	VL, VP,  R1: BOOL;
+	TP1 : TP;
+	TP2 : TP;
+	TP3 : TP;
+	TP4 : TP;
+	pt: REAL:=2000;
+	SK : SKOR_VYB;
+	FT1 : F_TRIG;
+	FT2 : F_TRIG;
+	pt2 : REAL:=0;
+
+(**********************************************************************************)
+	sm : REAL := 85;				(* угол отступления *)
+	smm : REAL := 9;        (* зона нечувствительности *)
+	tt : TIME :=T#130ms;							(* время работы клапана *)
+	tt1 : TIME:=T#900ms;							(* пауза между импульсами *)
+END_VAR
+
+(********************************************************************   ОСНОВНОЙ ЦИКЛ   *********************************************************************)
+CLIENT_FOR_ACPVT();
+(*SERVER_FOR_IMS();*)
+
+(* Для резервной линейки - раскомментировать строку ниже *)
+(* if abyBuffer[i-1] <> reserveLine THEN*)
+
+MestnLamp := Mestn;					(* Индикатор МЕСТНОЕ *)
+DistLamp  := Dist;							(* Индикатор ДИСТАНЦИОННОЕ *)
+OsnLamp   := Osn;							(* Индикатор ОСНОВНОЕ *)
+RezLamp   := Rez;							(* Индикатор РЕЗЕРВНОЕ *)
+HodLamp   := Hod;							(* Индикатор ХОД *)
+
+
+IF Mestn AND Test THEN  			(* Индикатор ТЕСТ включаем только при местном управлении *)
+	test_state := Test;
+ELSE
+	test_state  := FALSE;
+	TestLamp := FALSE;
+END_IF
+NALamp:=NAVkl;								(* Индикатор работы НА *)
+IF ABS(CurrentAngle/10-180)>34 THEN  (* Включение индикаторов ДКП *)
+	DKPLLamp := NOT DKPL;
+	DKPRLamp := NOT DKPR;
+	ELSE
+	DKPLLamp := FALSE;
+	DKPRLamp := FALSE;
+END_IF
+
+(****************************************************************  обработка ошибок по событию   ************************************************************)
+IF NOT DKPL AND NOT DKPR THEN (* если нет сигналов от левого и правого ДКП - обрыв концевиков *)
+	Error_DKP := TRUE;
+ELSE
+	Error_DKP := FALSE;
+END_IF
+IF NOT Dist AND NOT Mestn THEN (* Нет связи с переключателем Местн./Дист. *)
+	Error_SA1:=TRUE;
+ELSE
+	Error_SA1:=FALSE;
+END_IF
+
+IF NOT Osn AND NOT Rez THEN (* Нет связи с переключателем Осн./Рез. *)
+	Error_SA2:=TRUE;
+ELSE
+	Error_SA2:=FALSE;
+END_IF
+IF NOT Hod AND NOT Test THEN (* Нет связи с переключателем Ход/Тест *)
+	Error_SA3:=TRUE;
+ELSE
+	Error_SA3:=FALSE;
+END_IF
+
+IF LeftOut AND RightOut THEN
+	LeftOut := FALSE;
+	RightOut := FALSE;
+END_IF
+
+(***********************************************************    Работа в режиме ТЕСТ    *********************************************************************)
+IF test_state THEN
+	IF NOT TestLamp THEN	(* Сброс установки в "0" при переходе в режим "ТЕСТ" *)
+		ustload:=TRUE;
+	ELSE
+		ustload:=FALSE;
+	END_IF
+	TestLamp:=Test;		(* включение индикатора *)
+	leftTON(IN:=OldLBut, PT:=t);
+		Lcount:=leftTON.Q;
+	rightTON(IN:=OldRBut, PT:=t);
+		Rcount:=rightTON.Q;
+	IF (zadanie_visual) > -lim THEN
+		IF LBut AND NOT OldLBut AND NOT leftTON.Q AND NOT FlagBut THEN   (* команда "-" счетчику при нажатии *)
+			Lcount:=TRUE;
+		END_IF
+	END_IF
+	IF (zadanie_visual) < lim THEN
+		IF RBut AND NOT OldRBut AND NOT rightTON.Q AND NOT FlagBut THEN  (* команда "+" счетчику при нажатии *)
+			Rcount:=TRUE;
+		END_IF
+	END_IF
+
+	ustCTUD(CD:=Lcount, CU:=Rcount, LOAD:=ustload, PV:=zero);	(* задание угла отработки *)
+		zadanie_visual:=ustCTUD.CV-zero;
+
+	OldLBut:=LBut;	(* Запоминаем положение кнопки "ЛЕВО"  в предыдущем цикле *)
+	OldRBut:=RBut;	(* Запоминаем положение кнопки "ПРАВО" в предыдущем цикле *)
+
+	IF leftTON.Q THEN		(* Сброс стартового условия для таймера *)
+		OldLBut:=FALSE;
+	END_IF
+	IF rightTON.Q THEN	(* Сброс стартового условия для таймера *)
+		OldRBut:=FALSE;
+	END_IF
+
+	IF (zadanie_visual) >= lim THEN  (* Ограничение задания угла *)
+		OldRBut := FALSE;
+	END_IF
+	IF (zadanie_visual) <= -lim THEN  (* Ограничение задания угла *)
+		OldLBut := FALSE;
+	END_IF
+
+	IF LBut OR RBut THEN       (* установка флага на время удержание кнопки ЛЕВО или ПРАВО *)
+		FlagBut:=TRUE;
+	ELSE
+		FlagBut:=FALSE;
+	END_IF
+
+	IF NOT FlagBut THEN
+		FlagStart:=TRUE;
+	ELSE
+		FlagStart:=FALSE;
+	END_IF
+
+	startTON(IN:=FlagStart, PT:=T#2s);  (* начало отработки задания спустя 2 сек. после отпускания кнопок *)
+	IF startTON.Q THEN
+		zadanie_TEST := zadanie_visual;
+		zadanie_IMS  := zadanie_TEST;
+	END_IF
+ELSE
+	FlagTest:=FALSE;
+END_IF
+
+
+
+(*****************************************************************   Активация клапанов   *******************************************************************)
+IF (NOT Error_ACPVT AND NOT Error_DKP AND NOT Error_SA1 AND NOT Error_SA2 AND NOT Error_SA3) THEN (* работа при отсутствиии ошибок *)
+	IF TestLamp AND ((Osn AND NAVkl) OR Rez) THEN  															(* машина в режиме ТЕСТ *)
+
+	IF Osn THEN
+	REG(TEKU:=(CurrentAngle-1800)/10, ZADANIE:=zadanie_TEST);
+	LeftOut:=REG.VLEVO;
+	RightOut:=REG.VPRAVO;
+	END_IF
+
+	IF Rez THEN
+			IF zadanie_TEST*10<(CurrentAngle-1800-smm) THEN
+									IF ABS(zadanie_TEST*10-(CurrentAngle-1800))>sm  THEN									(*Если рассогласование больше заданного угла (угол задать)*)
+										LeftOut := TRUE;																													(*Включаем на полную*)
+									ELSE
+										BL(ENABLE:=TRUE, TIMELOW:=tt1 , TIMEHIGH:=tt);		(*Иначе включаем короткимы тычками в зависимости от заданнго времени*)
+										LeftOut :=BL.OUT;
+									END_IF
+			ELSE
+			LeftOut := FALSE;
+			END_IF
+
+			IF zadanie_TEST*10>(CurrentAngle-1800+smm) THEN
+									IF ABS(zadanie_TEST*10-(CurrentAngle-1800))>sm  THEN									(*Если рассогласование больше заданного угла (угол задать)*)
+										RightOut := TRUE;																				(*Включаем на полную*)
+									ELSE
+										RightOut := FALSE;
+										BL(ENABLE:=TRUE, TIMELOW:=tt1, TIMEHIGH:=tt);		(*Иначе включаем короткимы тычками в зависимости от заданнго времени*)
+										RightOut :=BL.OUT;
+									END_IF
+			ELSE
+			RightOut := FALSE;
+			END_IF
+	END_IF
+
+(*TP1(IN:=VL, PT:=REAL_TO_TIME(pt));
+	TP2(IN:=VP, PT:=REAL_TO_TIME(pt));
+	SK (L:=LeftOut, P:=RightOut, TEK:=(CurrentAngle-1800)/10);
+	LeftOut:=TP1.Q OR TP4.Q;
+	RightOut:=TP2.Q OR TP3.Q;
+
+								IF pt2>0 THEN
+								FT1(CLK:=TP1.Q); 	TP3(IN:=FT1.Q, PT:=REAL_TO_TIME(pt2));	 (*Для проверки противовключения*)
+								FT2(CLK:=TP2.Q);	TP4(IN:=FT2.Q, PT:=REAL_TO_TIME(pt2));  (*Для проверки противовключения*)
+								END_IF*)
+END_IF
+
+IF HodLamp AND DistLamp AND NOT DistProst AND ((Osn AND NAVkl) OR Rez) THEN  (* машина в режиме дистанционного следящего управления *)
+
+	IF Osn THEN
+	REG(TEKU:=(CurrentAngle-1800)/10, ZADANIE:=zadanie_IMS/10);
+	LeftOut:=REG.VLEVO;
+	RightOut:=REG.VPRAVO;
+	END_IF
+
+	IF Rez THEN
+			IF zadanie_IMS<(CurrentAngle-1800-smm) THEN
+									IF ABS(zadanie_IMS-(CurrentAngle-1800))>sm  THEN									(*Если рассогласование больше заданного угла (угол задать)*)
+										LeftOut := TRUE;																													(*Включаем на полную*)
+									ELSE
+										BL(ENABLE:=TRUE, TIMELOW:=tt1 , TIMEHIGH:=tt);		(*Иначе включаем короткимы тычками в зависимости от заданнго времени*)
+										LeftOut :=BL.OUT;
+									END_IF
+			ELSE
+			LeftOut := FALSE;
+			END_IF
+
+			IF zadanie_IMS>(CurrentAngle-1800+smm) THEN
+									IF ABS(zadanie_IMS-(CurrentAngle-1800))>sm  THEN									(*Если рассогласование больше заданного угла (угол задать)*)
+										RightOut := TRUE;																				(*Включаем на полную*)
+									ELSE
+										RightOut := FALSE;
+										BL(ENABLE:=TRUE, TIMELOW:=tt1, TIMEHIGH:=tt);		(*Иначе включаем короткимы тычками в зависимости от заданнго времени*)
+										RightOut :=BL.OUT;
+									END_IF
+			ELSE
+			RightOut := FALSE;
+			END_IF
+	END_IF
+
+
+END_IF
+
+	Buzz:=FALSE;
+	error_flag := FALSE;
+ELSE	(* включение звукового сигнала при наличии сбоев в работе *)
+	IF NOT error_flag THEN
+		Buzz:=TRUE;
+		error_flag := TRUE;
+	END_IF
+	IF BuzzOFF THEN	(* отключение звукового сигнала по кнопке СБРОС ЗВУКА *)
+		Buzz:=FALSE;
+	END_IF
+END_IF
+
+IF NOT TestLamp AND NOT DistLamp AND (*Убрать*) NOT R1 (*Убрать*) THEN
+	RightOut := FALSE;
+	LeftOut := FALSE;
+END_IF
+
+(* Для резервной линейки - раскомментировать строку ниже *)
+(* END_IF *)
