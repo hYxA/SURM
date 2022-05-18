@@ -1,0 +1,255 @@
+PROGRAM MB_CLIENT_CPM712
+
+VAR_INPUT
+	fInitialize : BOOL := TRUE;
+	(* Создаем массив из элементов типа MODBUS_ITEM_DESCRIPTOR,
+		который показывает, какой MODBUS сервер (MODBUS-slave) в сети MODBUS
+		нас интересует, какие MODBUS-регистры и в каком порядке нужно у него
+		прочитать	*)
+	ModbusItemArray : ARRAY [0..4] OF MODBUS_ITEM_DESCRIPTOR :=
+	(																						 (* массив описателей запросов *)
+		RemoteAddr := 32,															(* адрес подчиненного узла *)
+		LocationType:= MB_HOLDING_REGISTER,							(* тип объекта (области) *)
+		LocationAddr:=0,				 (* адрес (смещение) объекта в выбранной области *)
+		ItemsCount:= 83,															(* количество регистров Modbus
+																									задается по событию onInit *)
+		fWrite := TRUE																	(* тип операции - запись *)
+		(*
+			 pabyData:= адрес массива под данные - нельзя задать статически - 
+			задаётся при обработке системного события OnInit в функции InitModbusClient 
+			ADR(PI_DiscreteInputsBitArray[0])
+		*)
+	),
+	(RemoteAddr:=100, LocationType:= MB_HOLDING_REGISTER, LocationAddr:=25,	ItemsCount := 5, fWrite:=TRUE), (* L1 *)
+	(RemoteAddr:=101, LocationType:= MB_HOLDING_REGISTER, LocationAddr:=25,	ItemsCount := 5, fWrite:=TRUE), (* R1 *)
+	(RemoteAddr:=200, LocationType:= MB_HOLDING_REGISTER, LocationAddr:=25,	ItemsCount := 5, fWrite:=TRUE), (* L2 *)
+	(RemoteAddr:=201, LocationType:= MB_HOLDING_REGISTER, LocationAddr:=25,	ItemsCount := 5, fWrite:=TRUE); (* R2 *)
+END_VAR
+
+(* Переменные, используемые для настройки обмена по RS-485 *)
+VAR
+	Display : ARRAY [0..83] OF WORD := 80(0);
+	L1      : ARRAY [0..4] OF WORD := 5(0);
+	R1      : ARRAY [0..4] OF WORD := 5(0);
+	L2      : ARRAY [0..4] OF WORD := 5(0);
+	R2      : ARRAY [0..4] OF WORD := 5(0);
+
+	(* экземпляр функционального блока MODBUS_PI_SERIAL *)
+	ModbusClient : MODBUS_PI_SERIAL;
+	(*флаг использования сегментирования(разбиения) запросов записи*)
+	fSegmented : BOOL := FALSE;
+	(* время ожидания ответа *)
+	timeToWait : TIME := T#200ms;
+	(* таймаут тишины для определения граница кадра*)
+	intervalTimeout : TIME := T#2ms;
+
+	idx : INT := 1;
+	time_to_act: TIME;
+	blInitialized: BOOL := FALSE;
+
+	task2: F_TASK_INFO;
+	Ett: BOOL;
+END_VAR
+
+(* Переменные, используемые для вывода информации на устройства отображения *)
+VAR
+	temp : REAL;
+	index, q : INT;
+	step : BYTE := 0;
+	send_display : ARRAY [0..79] OF WORD := 80(32); (* массив для передачи в дисплей *)
+	str1 : STRING(20) := '                    ';
+	str2 : STRING(20) := '                    ';
+	str3 : STRING(20) := '                    ';
+	str4 : STRING(20) := '                    ';
+	sub_str1 : STRING(20);
+	sub_str2 : STRING(20);
+	sub_str3 : STRING(20);
+	sub_str4 : STRING(20);
+	str_mestn : STRING(8) := 'Местное ';
+	str_dist  : STRING(8) := 'Дистанц.';
+	str_hod   : STRING(4) := 'Ход ';
+	str_test  : STRING(4) := 'Тест';
+	str_osn   : STRING(4) := 'Осн.';
+	str_rez   : STRING(4) := 'Рез.';
+	str_LB    : STRING(8) := 'ЛЕВО    ';
+	str_PB    : STRING(8) := 'ПРАВО   ';
+	str_angle : STRING(5);
+	sub_angle : STRING(5);
+	str_angle_test : STRING(5);
+	sub_angle_test : STRING(5);
+	x, a : INT := 0;
+END_VAR
+
+F_IecTasks_getInfo(ADR(task2), 16#FFFF);		(* для контроля состояния задачи *)
+
+IF blInitialized = FALSE THEN												 (* инициализация задачи *)
+	blInitialized := TRUE;
+	Display[82] := 80;
+	Display[80] := 0;
+	Display[81] := 0;
+END_IF
+	ModbusClient(fInit := FALSE);								(* постоянно вызываем экземпляр функционального блока MODBUS_PI_SERIAL *)
+
+
+(********************************************************   Работа с индикаторами ОВЕН СМИ2   ******************************************************)
+x := REAL_TO_INT(CurrentAngle)-1800;
+IF 0>=x THEN
+	L1[0] := ABS(x);
+	R1[0] := 0;
+	L2[0] := ABS(x);
+	R2[0] := 0;
+END_IF
+
+IF 0<=x THEN
+	L1[0] := 0;
+	R1[0] := x;
+	L2[0] := 0;
+	R2[0] := x;
+END_IF
+
+(*********************************   Преобразование символов в ASCII для отображения дисплея по строкам   **************************************)
+FOR index:=1 TO LEN(str1) DO  (* 1-я строка *)
+	sub_str1 := MID(str1, 1, index);
+	FOR q:=0 TO array_size DO
+		IF str_arr[q].symbol = sub_str1 THEN
+			Display[index-1]:=str_arr[q].code;
+			EXIT;
+		END_IF
+	END_FOR
+END_FOR
+
+FOR index:=1 TO LEN(str2) DO  (* 2-я строка *)
+	sub_str2 := MID(str2, 1, index);
+	FOR q:=0 TO array_size DO
+		IF str_arr[q].symbol = sub_str2 THEN
+			Display[index-1+20]:=str_arr[q].code;
+			EXIT;
+		END_IF
+	END_FOR
+END_FOR
+
+FOR index:=1 TO LEN(str3) DO  (* 3-я строка *)
+	sub_str3 := MID(str3, 1, index);
+	FOR q:=0 TO array_size DO
+		IF str_arr[q].symbol = sub_str3 THEN
+			Display[index-1+40]:=str_arr[q].code;
+			EXIT;
+		END_IF
+	END_FOR
+END_FOR
+
+FOR index:=1 TO LEN(str4) DO  (* 4-я строка *)
+	sub_str4 := MID(str4, 1, index);
+	FOR q:=0 TO array_size DO
+		IF str_arr[q].symbol = sub_str4 THEN
+			Display[index-1+60]:=str_arr[q].code;
+			EXIT;
+		END_IF
+	END_FOR
+END_FOR
+
+(************************************************   состояние асосного агрегата, верхний левый угол    *********************************************)
+IF NALamp THEN
+	str1 := 'НА вкл ';
+ELSE
+	str1 := 'НА откл';
+END_IF
+(*************************   Вьлюбом режиме выводим на экран текущее состояние угла поворота рулей в четвертую строку   ******************************)
+IF NOT Error_ACPVT THEN
+	str4 := 'Текущее:            ';
+	IF (CurrentAngle/10-180)<0 THEN  (* Отображаем надпись [Текущее:  ЛЕВО  ХХ.Х] *)
+		str4 := INSERT(str4, str_LB,10);
+	END_IF
+	IF (CurrentAngle/10-180)>0 THEN  (* Отображаем надпись [Текущее:  ПРАВО ХХ.Х] *)
+		str4 := INSERT(str4, str_PB,10);
+	END_IF
+	IF (CurrentAngle-1800)<1 AND (CurrentAngle-1800)>-1 THEN  (* Отображаем надпись [Текущее:         0.0] *)
+		str4 := INSERT(str4, '        ',10);
+	END_IF
+
+	str_angle := REAL_TO_STRING(ABS(CurrentAngle/10-180));  (* Выравнивание выводимого значения по правому краю *)
+	FOR index:=1 TO LEN(str_angle) DO
+		sub_angle := MID(str_angle, 1, index);
+		IF sub_angle = str_arr[0].symbol THEN
+			EXIT;
+		END_IF
+	END_FOR
+	str4 := INSERT(str4, str_angle,19-index);
+ELSE
+	str4 := 'Ошибка датчика ОС   ';
+END_IF
+
+IF Test AND Dist THEN
+	str2 := 'Перейдите в реж. ХОД';
+	str3 := '  или режим МЕСТН.  ';
+END_IF
+(************************************************   Вывод на экран информации в режиме ТЕСТ   *******************************************************)
+IF NOT Error_DKP AND NOT Error_SA1 AND NOT Error_SA2 AND NOT Error_SA3 THEN
+	IF TestLamp THEN
+		str2 := 'РЕЖИМ: МЕСТНОЕ ТЕСТ';
+		str3 := 'Задание:            ';
+
+		IF (zadanie_visual)<0 THEN  (* Отображаем надпись [Текущее:  ЛЕВО  ХХ.Х] *)
+			str3 := INSERT(str3, str_LB,10);
+		END_IF
+		IF (zadanie_visual)>0 THEN  (* Отображаем надпись [Текущее:  ПРАВО  ХХ.Х] *)
+			str3 := INSERT(str3, str_PB,10);
+		END_IF
+
+		str_angle_test := REAL_TO_STRING(ABS(zadanie_visual));  (* Выравнивание выводимого значения по правому краю *)
+		FOR index:=1 TO LEN(str_angle_test) DO
+			sub_angle_test := MID(str_angle_test, 1, index);
+		END_FOR
+		str3 := INSERT(str3, str_angle_test,19-index);	(* вывод на дисплей значения угла в виде [Задание:  ХХХХХ ХХ.Х]          *)
+		str3 := INSERT(str3, '.0',18);									(* в этой строке пристраиваем .0 в конце числа для визуального комфорта *)
+	END_IF
+END_IF
+(************************************************   Вывод на экран информации в режиме ХОД   ********************************************************)
+IF NOT Error_DKP AND NOT Error_SA1 AND NOT Error_SA2 AND NOT Error_SA3 THEN
+	IF HodLamp AND NOT TestLamp THEN
+		IF MestnLamp AND HodLamp THEN	(* МЕСТНОЕ управление, режим ХОД *)
+			str2 := 'РЕЖИМ: МЕСТНОЕ ХОД';
+			str3 := '                    ';
+		END_IF
+		IF DistLamp AND NOT DistProst THEN	(* ДИСТАНЦИОННОЕ управление, следящий режим *)
+			str2 := 'РЕЖИМ: ДИСТ.СЛЕДЯЩИЙ';
+			str3 := 'Задание:            ';		(* Третья строка отображает угол задания от ИМС *)
+			IF (zadanie_IMS)<0 THEN  (* Отображаем надпись [Текущее:  ЛЕВО  ХХ.Х] *)
+				str3 := INSERT(str3, str_LB,10);
+			END_IF
+			IF (zadanie_IMS)>0 THEN  (* Отображаем надпись [Текущее:  ПРАВО  ХХ.Х] *)
+				str3 := INSERT(str3, str_PB,10);
+			END_IF
+			str_angle_test := REAL_TO_STRING(ABS(zadanie_IMS/10));
+			FOR index:=1 TO LEN(str_angle_test) DO
+				sub_angle_test := MID(str_angle_test, 1, index);
+				IF sub_angle_test = str_arr[0].symbol THEN
+					EXIT;
+				END_IF
+			END_FOR
+			str3 := INSERT(str3, str_angle_test,19-index);
+		END_IF
+		IF DistLamp AND DistProst THEN	(* Режим ДИСТАНЦИОННЫЙ ПРОСТОЙ *)
+			str2 := 'РЕЖИМ: ДИСТ.ПРОСТОЙ ';
+			str3 := '                    ';
+		END_IF
+	END_IF
+END_IF
+
+(*******************************************************   вывод на дисплей сообщений об ошибках   **************************************************)
+IF Error_DKP THEN
+	str2 := '  Неиспр. датчиков  ';
+	str3 := 'конечного положения ';
+END_IF
+IF Error_SA1 THEN
+	str2 := 'Неиспр.переключат. ';
+	str3 := '   МЕСТН. / ДИСТ.  ';
+END_IF
+IF Error_SA2 THEN
+	str2 := 'Неиспр.переключат. ';
+	str3 := '  ОСНОВН. / РЕЗЕРВ ';
+END_IF
+IF Error_SA3 THEN
+	str2 := 'Неиспр.переключат. ';
+	str3 := '     ХОД / ТЕСТ    ';
+END_IF
