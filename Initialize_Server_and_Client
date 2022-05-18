@@ -1,0 +1,11 @@
+FUNCTION Initialize_Server_and_Client : BYTE
+VAR_INPUT
+	eventType: DWORD;
+END_VAR
+
+InitMbServer(eventType := F_EVENT_ON_INIT);
+
+CASE eventType OF
+  F_EVENT_ON_INIT:
+		MB_CLIENT_CPM712.Init();
+END_CASE
