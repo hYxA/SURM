@@ -1,10 +1,10 @@
-(* Границы кадров на принимающей стороне определяются по превышению таймаута после приема последнего символа    							*)
+(* Границы кадров на принимающей стороне определяются по превышению таймаута после приема последнего символа    	      *)						*)
 (* Сервер отвечает только на адресованные ему запросы, описанного выше формата и при условии корректного CRC в принятом кадре *)
-(* В примере определена единственная функция ping с кодом 11, выполняющая эхо-ответ данных запроса в кадре ответа мастеру 		*)
-(* Клиент с периодом 200мс выполняет вызов функции ping 																																			*)
+(* В примере определена единственная функция ping с кодом 11, выполняющая эхо-ответ данных запроса в кадре ответа мастеру     *)
+(* Клиент с периодом 200мс выполняет вызов функции ping 								      *)																										*)
 
 FUNCTION_BLOCK CLIENT_FOR_ACPVT
-(* Ïðîãðàììà êëèåíòà *)
+(* Программа клиента *)
 
 VAR
 	(* Функциональный блок NIM74х *)
@@ -29,39 +29,39 @@ VAR
 	timeToWait : TIME := T#10ms;
 
 	(* Таймаут межсимвольного интервала, для определения  *)
-	intervalTimeout : TIME := T#5ms;                                   (* âîçìîæíî òîæå óìåíüøèòü â 4 ðàçà *)
+	intervalTimeout : TIME := T#5ms;                                   (* возможно уменьшить в 4 раза *)
 
-	(* Ïðèçíàê ïðîâåäåííîé èíèöèàëèçàöèè *)
+	(* Признак проведенной инициализации *)
 	fInitialized : BOOL := FALSE;
 
-	(* Ìàññèâ ïîä ôîðìèðîâàíèå çàïðîñà/îòâåòà *)
+	(* Массив под формирование запроса/ответа *)
 	abyBuffer : ARRAY [0..255] OF BYTE;
 
-	(* Êîä ôóíêöèè çàïðîñà *)
+	(* Код функции запроса *)
 	byFunctionCode : BYTE := 1;
 
-	(* Äëèíà äàííûõ *)
+	(* Длина данных *)
 	wDataLen : WORD;
 
-	(* Îffset *)
+	(* Offset *)
 	wOffset : WORD;
 
-	(* Êîíòðîëüíàÿ ñóììà *)
-	wCrc16 :BYTE := 126; (* èíâåíðñèÿ ñóììû àäðåñ+êîä ôóíêöèè, 128+1 *)
+	(* Контрольная сумма *)
+	wCrc16 :BYTE := 126; (* Инверсия суммы адрес+код функции, 128+1 *)
 	indx : INT;
 
-	(* Ñ÷åò÷èê èíèöèèðîâàííûõ òðàíçàêöèé *)
+	(* Счетчик инициированных транзакций *)
 	transactionCount : DWORD;
 
-	(* Ñ÷åò÷èê òðàíçàêöèé çàâåðøåííûõ óñïåøíî *)
+	(* Счетчик транзакций, завершенных успешно *)
 	transactionOkCount : DWORD;
 
-	(* Ñ÷åò÷èê òðàíçàêöèé çàâåðøåííûõ îøèáêîé *)
+	(* Счетчик транзакций, завершенных с ошибкой *)
 	transactionErrorCount : DWORD;
 
-	(* ñòàðò-áàéò ïî ðèâàñó, îí æå è ñòîï-áàéò *)
+	(* старт-байт по ривасу, он же стоп-байт *)
 	start_byte : BYTE := 255;
-	(* ìàññèâ ïîëó÷åííûõ äàííûõ î ïîëîæåíèè ÂÒ *)
+	(* Массив полученных данных о положении ВТ *)
 	mydata : ARRAY [0..3] OF BYTE := 4(0);
 	i : INT;
 	my_crc : BYTE;
@@ -72,3 +72,185 @@ VAR
 	countData : INT :=0;
   countAngle : INT :=0;
 END_VAR
+
+IF NOT gStartAll THEN
+	RETURN;
+END_IF
+
+currentTime := TIME();
+
+IF fInitialized = FALSE OR hwNim74x.state = UART_UNCERTAIN THEN
+	(* инициализация мастера или сбой устройства NIM74x *)
+
+	(* ставим "нерабочее" состояние мастера *)
+	masterState := MASTER_IDLE;
+
+	(* выполняем инициализацию параметров мастера. *)
+	IF fInitialized = FALSE THEN
+		transactionCount := 0;
+		transactionOkCount := 0;
+		transactionErrorCount := 0;
+		zero_angle := (180/EXPT(2,13)); (* наименьшее показание преобразователя, равное 0,02197265625 градуса*)
+
+		fInitialized := TRUE;
+	END_IF
+
+	(* инициализируем блок NIM74x *)
+	hwNim74x
+	(
+		command:= UART_CMD_INIT,
+		state=> ,
+		status=>
+	);
+
+	requestTime := currentTime;
+
+	(* ждем готовности блока NIM74x *)
+	IF hwNim74x.state = UART_UNCERTAIN THEN
+		RETURN;
+	END_IF
+END_IF
+
+IF hwNim74x.state = UART_READY THEN
+	(* предыдущая операция (INIT, RECEIVE, TRANSMIT) завершена *)
+
+	CASE masterState OF
+
+	MASTER_RECV_RESPONSE:
+		(* мастер в состоянии ожидания ответа сервера / завершена операция чтения - смотрим что принято *)
+
+		(* получаем длину принятых данных и проверяем на минимальный размер кадра *)
+		(* в нашем случае формат кадра сервера: адрес мастера(byte)+код результата(byte)+длина данных(word)+ данные + crc(word) *)
+		(* минимальный размер кадра (при отсутствии данных): адрес(byte)+код результата(byte)+длина данных(word)+crc(word) = 6 байт *)
+		IF hwNim74x.receivedDataSize < 9 THEN
+			transactionErrorCount := transactionErrorCount + 1; (* нет ответа или длина ответа меньше минимальной *)
+
+		(* проверяем поле адреса *)
+		ELSIF abyBuffer[0] <> 255 THEN
+			transactionErrorCount := transactionErrorCount + 1;	(* неверный адрес *)
+
+		(* проверяем код результата *)
+		ELSIF abyBuffer[1] <> 128 THEN
+			transactionErrorCount := transactionErrorCount + 1;	(* получен код исключения *)
+			ELSE
+				(* проверяем контрольную сумму *)
+				(* смещение поля CRC16 в кадре *)
+				wOffset := hwNim74x.receivedDataSize -  3;
+				wCrc16 := abyBuffer[7];
+				(* сравниваем записанное значение CRC16 с вычисленным значением *)
+
+	my_crc := 0;
+	FOR i:=1 TO 6 DO
+		my_crc := my_crc + abyBuffer[i];
+	END_FOR
+	my_crc := my_crc XOR 255;
+
+				IF wCrc16 <> my_crc THEN
+					transactionErrorCount := transactionErrorCount + 1; (* несовпадение котрольной суммы *)
+				ELSE
+					(* в нашем примере данные ответа не используются и не анализируются *)
+					(* транзакция успешно завершена *)
+					transactionOkCount := transactionOkCount + 1;
+					FOR i := 0 TO 3 DO
+						mydata[i] := abyBuffer[i+3];
+					END_FOR
+				END_IF
+			END_IF
+		(*END_IF*)
+
+		masterState := MASTER_IDLE;
+
+	MASTER_SEND_REQUEST:
+		(* мастер в состоянии передачи запроса / передача данных запроса завершена *)
+		(* переходим в состояние приема ответа *)
+		hwNim74x
+		(
+			command:= UART_CMD_RECEIVE,
+			pReceiveBuffer:= ADR(abyBuffer[0]),
+			receiveBufferSize:= SIZEOF(abyBuffer) ,
+			timeToWait:= timeToWait,
+			intervalTimeout:= intervalTimeout,
+			receivedDataSize=> ,
+			state=> ,
+			status=>
+		);
+
+		masterState := MASTER_RECV_RESPONSE;
+
+	MASTER_IDLE:
+		(* мастер находится в состоянии ожидания времени запуска новой транзакции *)
+		IF currentTime >= requestTime THEN
+			(* время отправлять запрос *)
+			(* в нашем примере формат кадра запроса: Старт_байт(byte) + адрес_сервера(byte)+код_функции(byte) + crc(byte) + стоп_байт(byte) + стоп-байт(byte) *)
+			abyBuffer[0] := start_byte;     (* старт_байт = стоп_байт = 255 *)
+			abyBuffer[1] := byServerAddr;   (* адрес сервера *)
+			abyBuffer[2] := byFunctionCode; (* код функции *)
+			abyBuffer[3] := 126;            (* контрольная сумма *)
+			abyBuffer[4] := start_byte;     (* старт_байт = стоп_байт = 255 *)
+			abyBuffer[5] := start_byte;     (* старт_байт = стоп_байт = 255 *)
+
+			(* отправляем запрос *)
+			hwNim74x
+			(
+				command:= UART_CMD_TRANSMIT,
+				pDataToSend:= ADR(abyBuffer[0]),
+				sendDataSize:= 6,(*  *)
+				transmission_mode:= RTU_FRAME,
+				transmittedDataSize=> ,
+				state=> ,
+				status=>
+			);
+
+			(* переходим в состояние передачи запроса *)
+			masterState := MASTER_SEND_REQUEST;
+
+			(* инкрементируем счетчик транзакций *)
+			TransactionCount := TransactionCount + 1;
+
+			(* время выполнения следующей транзакции *)
+			requestTime := requestTime + requestPeriod;
+		END_IF
+	END_CASE
+
+ELSIF (hwNim74x.state = UART_RECEIVING) OR (hwNim74x.state = UART_TRANSMITTING) THEN
+	(* продолжаем выполнение операции *)
+	hwNim74x
+	(
+		command:= UART_CMD_IDLE,
+		receivedDataSize=> ,
+		sendDataSize=> ,
+		state=> ,
+		status=>
+	);
+END_IF
+
+	angle_data := mydata[0];
+	angle_data := SHL(angle_data, 8);
+	angle_data := angle_data OR mydata[1];
+IF NOT EXTRACT(angle_data, 0) THEN
+	angle := 0;
+	angle_fail := FALSE;
+	Error_ACPVT:=FALSE;	(* сброс флага ошибки АЦПВТ *)
+	FOR i:=2 TO 15 DO
+		IF EXTRACT(angle_data, INT_TO_BYTE(i)) THEN
+			angle := angle + zero_angle*EXPT(2, i-2);
+		END_IF
+	END_FOR
+	ELSE
+		angle_fail := TRUE;
+		Error_ACPVT:=TRUE;	(* установка флага ошибки АЦПВТ *)
+END_IF
+myAngle := angle;
+IF NOT EXTRACT(mydata[0], 7) OR NOT EXTRACT(mydata[0], 6) THEN
+	countData := countData + 1;
+END_IF
+IF NOT EXTRACT(angle_data, 15) OR NOT EXTRACT(angle_data, 14) THEN
+	countangle := countangle + 1;
+END_IF
+
+CurrentAngle := myAngle*10; (* умножаем на 10 для избавления от точки *)
+
+(************************ Протокол с ИМС *************************)
+(*  *)
+
+
